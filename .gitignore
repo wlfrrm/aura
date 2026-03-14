@@ -1,0 +1,60 @@
+# =======================
+# Node / React / JS stuff
+# =======================
+node_modules/
+dist/
+dist-ssr/
+build/
+*.local
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# =======================
+# Python
+# =======================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.env
+*.venv
+venv/
+ENV/
+env/
+.env/
+pip-log.txt
+pip-delete-this-directory.txt
+python.log
+
+# =======================
+# Editor / IDE
+# =======================
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.DS_Store
+
+# =======================
+# OS files
+# =======================
+Thumbs.db
+Desktop.ini
+
+/conf.toml
+
+/index.html
+/*.js
+/*.css
+/test.sqlite
