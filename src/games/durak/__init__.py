@@ -1,4 +1,7 @@
-from typing import Callable, Literal, Union
+import asyncio
+from enum import Enum
+from typing import Callable, Literal, Optional, Union
+from ...models.enums import States
 from ...models.typs import Player
 from ...models.gameplay import DurakConfig, GameConfig
 from ...connector import GameConn
@@ -6,19 +9,32 @@ from .card import Card, Ranks, Suits
 import random as rd
 from ...db import get_db
 
+class PlayerActs(Enum):
+    ATTACK = "ATTACK"
+    THROW = "THROW"
+    DEFEND = "DEFEND"
+    GIVEUP = "GIVEUP"
+    PASS = "PASS"
+
 class DurakGame():
-    __slots__ = ["id", "cfg", "players", "hands", "table",
-        "trump", "deck", "state", "active_players", "eliminated",
-        "conn", "attacker", "circle", "counter"
+    __slots__ = [
+        "id", "cfg", "players", "hands", "table", "trump", 
+        "deck", "state", "active_players", "eliminated",
+        "conn", "attacker", "circle", "counter", "game_state",
+        "futures", "processor_task", "passed_attackers", 
+        "passed", "bringed"
         ]
+        
 
     def __init__(self, config: GameConfig, id: str) -> None:
         if not isinstance(config.specialConfig, DurakConfig):
             raise ValueError("Пошел ка ты нахуй")
+        self.game_state = States.NOT_STARTED
         self.cfg = config
         self.id = id
+        self.bringed: bool = False
         self.players: list[Player] = []
-        self.hands: list[list[Card]] = []
+        self.hands: dict[Player, list[Card]] = {}
         self.table: list[list[Card]] = []
         self.deck: list[Card] = []
         self.state: Literal["attacking", "throwing"] = "attacking"
@@ -27,7 +43,10 @@ class DurakGame():
         self.eliminated: list[int] = []
         self.conn = GameConn()
         self.circle = 1
+        self.passed: list[Player] = []
         self.counter = self._round_counter()
+        self.futures: dict[Player, asyncio.Future] = {}
+        self.passed_attackers: list[Player] = []
     
     async def add_player(self, pl: Player) -> bool:
         mn = await get_db().get_money(pl.id)
@@ -38,15 +57,56 @@ class DurakGame():
         self.players.append(pl)
         return True
 
-    async def run(self) -> bool:
+    def run(self) -> bool:
         if len(self.players) != self.cfg.playersCount:
             raise ValueError("Cannot start: players count is less than recognised in config.")
         self.active_players = self.players.copy()
         self.attacker = rd.choice(self.active_players)
         self.state = "attacking"
+        self.game_state = States.GOING
         self._create_deck()
         self._deal_initial_hands()
+        self.processor_task = asyncio.create_task(
+            self._processor()
+        )
         return True
+
+    def act(self, acttype: PlayerActs,
+            player: Player,
+            slot: Optional[int], 
+            card: Optional[Card]) -> None:
+        if player not in self.active_players:
+            raise ValueError("Player is not active in game.")
+        match acttype:
+            case PlayerActs.PASS:
+                return self._pass(player)
+            case PlayerActs.ATTACK:
+                if not card:
+                    raise ValueError("Card data need.")
+                return self._attack(player, card)
+            case _:
+                raise ValueError("Unavaible action.")
+
+    # actions
+
+    def _attack(self, player: Player, card: Card) -> None:
+        if player != self.attacker:
+            raise ValueError("You dont attacker now.")
+        if len(self.table) != 0:
+            raise ValueError("Now throw stage, not attacking.")
+        self._substract_card(player, card)
+        self.table[0] = [card]
+        self.futures[player].set_result(...)
+        self.state = "throwing"
+        self._create_future(player)
+        self._create_future(self.defender)
+        self._pass(player)
+
+    def _pass(self, player: Player) -> None:
+        if player == self.attacker and len(self.table) == 0:
+            self.passed_attackers.append(player)
+            
+
 
     # bound
 
@@ -126,34 +186,69 @@ class DurakGame():
 
         self.deck = deck
         return deck
-    
+
     def _refill_hands(self) -> None:
         if not isinstance(self.cfg.specialConfig, DurakConfig):
             raise ValueError("Пошел ка ты нахуй")
         if not self.deck:
             return
 
-        max_cards = self.cfg.specialConfig.cardsCount // len(self.players) 
-        queue = [self.attacker]
-        for i in range(1, len(self.active_players)):
-            queue.append(self._get_player(self.attacker, i))
+        max_cards = self.cfg.specialConfig.cardsCount // len(self.players)
+
+        # создаём очередь игроков начиная с атакующего
+        queue = [self.attacker] + [self._get_player(self.attacker, i) for i in range(1, len(self.active_players))]
 
         for pl in queue:
-            idx = self.active_players.index(pl)
-            hand = self.hands[idx]
+            hand = self.hands[pl]
             missing = max_cards - len(hand)
             if missing <= 0:
-                continue 
+                continue
 
             draw = self.deck[:missing]
-            self.hands[idx].extend(draw)
+            hand.extend(draw)
             self.deck = self.deck[missing:]
 
     def _deal_initial_hands(self) -> None:
-        self.hands = [[] for _ in self.active_players]
-        max_cards = self.cfg.specialConfig.cardsCount // len(self.players) #type:ignore
-        
-        while any(len(hand) < max_cards for hand in self.hands) and self.deck:
-            for i, hand in enumerate(self.hands):
+        # создаём словарь Player -> пустая рука
+        self.hands = {pl: [] for pl in self.active_players}
+        max_cards = self.cfg.specialConfig.cardsCount // len(self.players)  # type: ignore
+
+        while any(len(hand) < max_cards for hand in self.hands.values()) and self.deck:
+            for pl, hand in self.hands.items():
                 if len(hand) < max_cards and self.deck:
                     hand.append(self.deck.pop(0))
+
+    def _substract_card(self, player: Player, card: Card) -> None:
+        try:
+            self.hands[player].remove(card)
+        except ValueError:
+            raise ValueError("You dont have this card.")
+
+    def _move_to_next_attacker(self):
+        self.attacker = self._get_player(self.attacker, self.bringed + 1)
+# self.bringed + 1 => 2 if True and 1 if False, coz int(True) = 1, an. False => 0
+        self.bringed = False
+
+    async def _wait_future(self, player: Player):
+        try:
+            fut = self.futures.get(player)
+            if not fut:
+                raise ValueError("Player has no active actions.")
+            await asyncio.wait_for(fut, 
+                (7 if self.cfg.speed == "Rapid" else
+                (15 if self.cfg.speed == "Fast" else 25))
+            )
+        except asyncio.TimeoutError:
+            self._pass(player)
+        del self.futures[player]
+
+    def _create_future(self, player: Player):
+        self.futures[player] = asyncio.get_event_loop().create_future()
+
+    async def _processor(self):
+        while self.game_state == States.GOING:
+            for pl in self.futures.keys():
+                asyncio.create_task(
+                    self._wait_future(pl)
+                )
+        return
