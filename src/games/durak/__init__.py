@@ -1,0 +1,159 @@
+from typing import Callable, Literal, Union
+from ...models.typs import Player
+from ...models.gameplay import DurakConfig, GameConfig
+from ...connector import GameConn
+from .card import Card, Ranks, Suits
+import random as rd
+from ...db import get_db
+
+class DurakGame():
+    __slots__ = ["id", "cfg", "players", "hands", "table",
+        "trump", "deck", "state", "active_players", "eliminated",
+        "conn", "attacker", "circle", "counter"
+        ]
+
+    def __init__(self, config: GameConfig, id: str) -> None:
+        if not isinstance(config.specialConfig, DurakConfig):
+            raise ValueError("Пошел ка ты нахуй")
+        self.cfg = config
+        self.id = id
+        self.players: list[Player] = []
+        self.hands: list[list[Card]] = []
+        self.table: list[list[Card]] = []
+        self.deck: list[Card] = []
+        self.state: Literal["attacking", "throwing"] = "attacking"
+        self.active_players: list[Player] = []
+        self.attacker: Player
+        self.eliminated: list[int] = []
+        self.conn = GameConn()
+        self.circle = 1
+        self.counter = self._round_counter()
+    
+    async def add_player(self, pl: Player) -> bool:
+        mn = await get_db().get_money(pl.id)
+        if not mn:
+            raise ValueError("Player is not exist")
+        if mn < self._calc_exp():
+            raise ValueError("You have no so credits")
+        self.players.append(pl)
+        return True
+
+    async def run(self) -> bool:
+        if len(self.players) != self.cfg.playersCount:
+            raise ValueError("Cannot start: players count is less than recognised in config.")
+        self.active_players = self.players.copy()
+        self.attacker = rd.choice(self.active_players)
+        self.state = "attacking"
+        self._create_deck()
+        self._deal_initial_hands()
+        return True
+
+    # bound
+
+    @property
+    def defender(self) -> Player:
+        return self._get_player(
+            self.attacker,
+            1 # next
+        )
+
+    def _can_beat(self, old: Card, new: Card, trump: Suits):
+        if Suits.Joker in (old.suit, new.suit):
+            return True
+        if old.suit == new.suit:
+            return new.rank > old.rank
+        return new.suit == trump and old.suit != trump
+
+    def _calc_exp(self) -> int | float:
+        if self.cfg.betType == "all-in":
+            return self.cfg.gameBet + 0.1 * self.cfg.gameBet
+        else:
+            return round(self.cfg.gameBet / self.cfg.playersCount + 0.1 * self.cfg.gameBet)
+
+    def _get_player(self, pl: Player, shift: int) -> Player:
+        if not self.active_players:
+            raise RuntimeError("Game is ended.")
+
+        try:
+            i = self.active_players.index(pl)
+        except ValueError:
+            raise RuntimeError("Player is not in game")
+
+        return self.active_players[(i + shift) % len(self.active_players)]
+    
+    def _round_counter(self) -> Callable[[], None]:
+        counter = 0
+
+        def _():
+            nonlocal counter
+
+            players_count = len(self.active_players)
+            if players_count == 0:
+                return
+
+            counter += 1
+
+            if counter >= players_count:
+                self.circle += 1
+                counter = 0
+
+        return _
+
+    def _create_deck(self) -> list[Card]:
+        deck: list[Card] = []
+        if not isinstance(self.cfg.specialConfig, DurakConfig):
+            raise ValueError("Пошел ка ты нахуй")
+        if self.cfg.specialConfig.cardsCount == 24:
+            ranks_range = [Ranks.Nine, Ranks.Ten, Ranks.Jack, Ranks.Queen, Ranks.King, Ranks.Ace]
+        elif self.cfg.specialConfig.cardsCount == 36:
+            ranks_range = [Ranks.Six, Ranks.Seven, Ranks.Eight, Ranks.Nine, Ranks.Ten,
+                        Ranks.Jack, Ranks.Queen, Ranks.King, Ranks.Ace]
+        elif self.cfg.specialConfig.cardsCount == 52:
+            ranks_range = [Ranks.Two, Ranks.Three, Ranks.Four, Ranks.Five, Ranks.Six, Ranks.Seven,
+                        Ranks.Eight, Ranks.Nine, Ranks.Ten, Ranks.Jack, Ranks.Queen, Ranks.King, Ranks.Ace]
+        else:
+            raise ValueError(f"Unsupported cards count: {self.cfg.specialConfig.cardsCount}")
+
+        for suit in [Suits.Piki, Suits.Trefy, Suits.Chervi, Suits.Bubny]:
+            for rank in ranks_range:
+                deck.append(Card(suit=suit, rank=rank))
+
+        if self.cfg.specialConfig.jokers:
+            deck.append(Card(suit=Suits.Joker, rank=Ranks.Joker))
+            deck.append(Card(suit=Suits.Joker, rank=Ranks.Joker))
+
+        rd.shuffle(deck)
+
+        self.deck = deck
+        return deck
+    
+    def _refill_hands(self) -> None:
+        if not isinstance(self.cfg.specialConfig, DurakConfig):
+            raise ValueError("Пошел ка ты нахуй")
+        if not self.deck:
+            return
+
+        max_cards = self.cfg.specialConfig.cardsCount // len(self.players) 
+        queue = [self.attacker]
+        for i in range(1, len(self.active_players)):
+            queue.append(self._get_player(self.attacker, i))
+
+        for pl in queue:
+            idx = self.active_players.index(pl)
+            hand = self.hands[idx]
+            missing = max_cards - len(hand)
+            if missing <= 0:
+                continue 
+
+            draw = self.deck[:missing]
+            self.hands[idx].extend(draw)
+            self.deck = self.deck[missing:]
+
+    def _deal_initial_hands(self) -> None:
+        self.hands = [[] for _ in self.active_players]
+        max_cards = self.cfg.specialConfig.cardsCount // len(self.players) #type:ignore
+        
+        while any(len(hand) < max_cards for hand in self.hands) and self.deck:
+            for i, hand in enumerate(self.hands):
+                if len(hand) < max_cards and self.deck:
+                    hand.append(self.deck.pop(0))

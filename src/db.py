@@ -62,10 +62,13 @@ class Database: # temp variant with sqlite3, will be replaced with postgres in t
         return await self.do(self.q.add_money, money, id)
 
     async def get_money(self, id: int):
-        return (await self.fetchone(
-            self.q.get_money,
-            id
-        )).get("money") #type:ignore
+        try:
+            return (await self.fetchone(
+                self.q.get_money,
+                id
+            )).get("money") #type:ignore
+        except AttributeError:
+            return None
 
 singleton = Database()
 get_db = lambda: singleton

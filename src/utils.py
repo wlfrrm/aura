@@ -2,7 +2,7 @@ import hmac
 import hashlib
 from typing import Dict
 from .config import Config
-
+import random as rd
 
 def check_webapp_hash(data: Dict[str, str]) -> bool:
     """Validate Telegram WebApp data using server-side bot token"""
@@ -14,3 +14,9 @@ def check_webapp_hash(data: Dict[str, str]) -> bool:
     hmac_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
     return hmac_hash == hash_to_check
+
+BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+def random_base62(min_len=7, max_len=14) -> str:
+    length = rd.randint(min_len, max_len)
+    return ''.join(rd.choices(BASE62, k=length))

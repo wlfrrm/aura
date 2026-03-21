@@ -1,20 +1,33 @@
-import fastapi
+import fastapi as fa
 from aiogram import Bot, Dispatcher
+import pydantic as pd
 from .config import Config
 from .db import get_db
 from .models import (LoginData, Player, WebAppData, 
                     TempLoginData, CreateGame)
+from .alloc import Allocator
 
-api = fastapi.FastAPI(docs_url=None, redoc_url=None, debug=Config.TEST_MODE)
+alloc = Allocator()
+api = fa.FastAPI(docs_url=None, redoc_url=None, debug=Config.TEST_MODE)
 bot = Bot(token=Config.BOT_TOKEN)
 dp = Dispatcher()
 
 @api.exception_handler(ValueError)
-async def value_error(req: fastapi.Request, exc: ValueError):
-    raise fastapi.HTTPException(
+async def value_error(req: fa.Request, exc: ValueError):
+    raise fa.HTTPException(
         422,
         f"value or some values is incorrect: {exc.args}",
     )
+
+@api.get("/")
+async def html_give():
+    html = ""
+    return fa.responses.HTMLResponse(html)
+
+@api.get("/js")
+async def script_give():
+    script = ""
+    return fa.responses.HTMLResponse(script)
 
 @api.post("/getMe")
 async def get_me(login: LoginData):
@@ -44,7 +57,7 @@ async def get_me(login: LoginData):
 
     except Exception as e:
         # если Pydantic кинул ValidationError — поймаем здесь
-        raise fastapi.HTTPException(status_code=403, detail=f"Invalid login data: {str(e)}")
+        raise fa.HTTPException(status_code=403, detail=f"Invalid login data: {str(e)}")
 
 @api.get("/getPlayer")
 async def get_player(id: int) -> Player:
@@ -53,7 +66,7 @@ async def get_player(id: int) -> Player:
     """
     usr = await get_db().get_user(id)
     if not usr:
-        raise fastapi.HTTPException(status_code=404, detail="Player not found")
+        raise fa.HTTPException(status_code=404, detail="Player not found")
     return Player(
         id=usr.id,
         name=usr.name,
@@ -66,3 +79,22 @@ async def new_game(data: CreateGame):
     gconfig = data.gameConfig
     
     return 
+
+@api.websocket("/gameApi/connect")
+async def connect_game(ws: fa.WebSocket, id: str):
+    game = alloc.get(id) # now returns None if game is not exist.
+    if not game:
+        raise fa.WebSocketException(404, "Game is not exist.")
+    await ws.accept()
+    try:
+        raw_login: pd.JsonValue = await ws.receive_json()
+        try:
+            login_data: LoginData = LoginData.model_validate(raw_login)
+        except pd.ValidationError:
+            await ws.close(1008, "пошел нахуй чмо")
+            return
+        while True:
+            data: pd.JsonValue = await ws.receive_json()
+            f"some actions with {data}"
+    except fa.WebSocketDisconnect:
+        pass

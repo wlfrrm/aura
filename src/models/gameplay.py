@@ -53,7 +53,7 @@ class GameConfig(BaseModel):
         sc = values.get("specialConfig")
         if gt == GameTypes.Durak and not isinstance(sc, DurakConfig):
             raise ValueError("specialConfig must be DurakConfig when gameType is Durak")
-        if gt == GameTypes.Uno and not isinstance(sc, UnoConfig):
-            raise ValueError("specialConfig must be UnoConfig when gameType is Uno")
+        # if gt == GameTypes.Uno and not isinstance(sc, UnoConfig):
+        #     raise ValueError("specialConfig must be UnoConfig when gameType is Uno")
         return values
 
