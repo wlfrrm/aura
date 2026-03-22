@@ -15,6 +15,7 @@ class PlayerActs(Enum):
     DEFEND = "DEFEND"
     GIVEUP = "GIVEUP"
     PASS = "PASS"
+    CHECK = "CHECK"
 
 class DurakGame():
     __slots__ = [
@@ -103,10 +104,30 @@ class DurakGame():
         self._pass(player)
 
     def _pass(self, player: Player) -> None:
-        if player == self.attacker and len(self.table) == 0:
+        if player == self.attacker:
+            if player in self.passed_attackers:
+                return self._giveup(player)
             self.passed_attackers.append(player)
+            self._move_to_next_attacker()
+            self._refill_hands()
+        elif player == self.defender:
+            if len(self.table) == 0:
+                raise ValueError("Attacker is not attacked yet.")
+            self.bringed = True
             
+            self._setup_throwers()
 
+        return
+
+
+    def _giveup(self, player: Player) -> None:
+        return
+
+    def _throw(self, player: Player, card: Card) -> None:
+        return
+
+    def _defend(self, player: Player, card: Card) -> None:
+        return
 
     # bound
 
@@ -228,6 +249,7 @@ class DurakGame():
         self.attacker = self._get_player(self.attacker, self.bringed + 1)
 # self.bringed + 1 => 2 if True and 1 if False, coz int(True) = 1, an. False => 0
         self.bringed = False
+        self.counter()
 
     async def _wait_future(self, player: Player):
         try:
@@ -235,8 +257,8 @@ class DurakGame():
             if not fut:
                 raise ValueError("Player has no active actions.")
             await asyncio.wait_for(fut, 
-                (7 if self.cfg.speed == "Rapid" else
-                (15 if self.cfg.speed == "Fast" else 25))
+                (6 if self.cfg.speed == "Rapid" else
+                (15 if self.cfg.speed == "Fast" else 30))
             )
         except asyncio.TimeoutError:
             self._pass(player)
@@ -251,4 +273,22 @@ class DurakGame():
                 asyncio.create_task(
                     self._wait_future(pl)
                 )
-        return
+
+    def _setup_throwers(self):
+        match self.cfg.specialConfig.throwing:
+            case "all":
+                pls = self.players.copy()
+                try:
+                    pls.remove(self.attacker)
+                    pls.remove(self.defender)
+                except ValueError:
+                    raise ValueError("game is fatal broken.")
+                for pl in pls:
+                    self._create_future(pl)
+            case "next-pervious-only":
+                self._create_future(self.attacker)
+                self._create_future(
+                    self._get_player(self.defender, 1)
+                )
+            case _:
+                raise ValueError("cho blyat, game is fatal broken.")
