@@ -23,7 +23,7 @@ class DurakGame():
         "deck", "state", "active_players", "eliminated",
         "conn", "attacker", "circle", "counter", "game_state",
         "futures", "processor_task", "passed_attackers", 
-        "passed", "bringed"
+        "passed", "bringed", "procfuture"
         ]
         
 
@@ -64,6 +64,7 @@ class DurakGame():
         self.active_players = self.players.copy()
         self.attacker = rd.choice(self.active_players)
         self.state = "attacking"
+        self.procfuture = asyncio.get_event_loop().create_future()
         self.game_state = States.GOING
         self._create_deck()
         self._deal_initial_hands()
@@ -76,58 +77,148 @@ class DurakGame():
             player: Player,
             slot: Optional[int], 
             card: Optional[Card]) -> None:
+        self.ping_proc()
         if player not in self.active_players:
             raise ValueError("Player is not active in game.")
         match acttype:
             case PlayerActs.PASS:
-                return self._pass(player)
+                self._pass(player)
             case PlayerActs.ATTACK:
                 if not card:
                     raise ValueError("Card data need.")
-                return self._attack(player, card)
+                self._attack(player, card)
             case _:
                 raise ValueError("Unavaible action.")
-
-    # actions
+        self.ping_proc()
+    # --- actions ---
 
     def _attack(self, player: Player, card: Card) -> None:
         if player != self.attacker:
             raise ValueError("You dont attacker now.")
-        if len(self.table) != 0:
+        if self.state != "attacking":
             raise ValueError("Now throw stage, not attacking.")
+        if not self.table:
+            self.table.append([])
+
         self._substract_card(player, card)
-        self.table[0] = [card]
-        self.futures[player].set_result(...)
+        self.table[0].append(card)
+        if player in self.futures:
+            self.futures[player].set_result(...)
+            del self.futures[player]
+        
         self.state = "throwing"
-        self._create_future(player)
-        self._create_future(self.defender)
-        self._pass(player)
+
+        if self.defender not in self.futures:
+            self._create_future(self.defender)
+        if player not in self.futures:
+            self._create_future(player)
 
     def _pass(self, player: Player) -> None:
         if player == self.attacker:
             if player in self.passed_attackers:
-                return self._giveup(player)
+                self._giveup(player)
+                return
             self.passed_attackers.append(player)
             self._move_to_next_attacker()
             self._refill_hands()
-        elif player == self.defender:
-            if len(self.table) == 0:
+            return
+
+        if player == self.defender:
+            if not self.table:
                 raise ValueError("Attacker is not attacked yet.")
             self.bringed = True
-            
-            self._setup_throwers()
+            self.passed.append(player)
 
-        return
+            if player in self.futures:
+                self.futures[player].set_result(...)
+                del self.futures[player]
 
+            for pl in self.active_players:
+                if pl != self.defender and pl not in self.passed and pl not in self.futures:
+                    self._create_future(pl)
+
+            if all(pl in self.passed for pl in self.active_players if pl != self.defender):
+                self._setup_throwers()
+            return
+
+        if self.state == "throwing" and player in self.futures:
+            self.passed.append(player)
+            self.futures[player].set_result(...)
+            del self.futures[player]
+
+            if all(pl in self.passed for pl in self.active_players if pl != self.defender):
+                self._setup_throwers()
+            return
 
     def _giveup(self, player: Player) -> None:
-        return
+        if player not in self.hands:
+            return
+
+        for pile in self.table:
+            self.hands[player].extend(pile)
+
+        self.table.clear()
+        self.bringed = False
+        self.passed.clear()
+        self.passed_attackers.clear()
+
+        self._move_to_next_attacker()
+        self._refill_hands()
 
     def _throw(self, player: Player, card: Card) -> None:
-        return
+        if self.state != "throwing":
+            raise ValueError("Not throw phase.")
+        if player == self.defender:
+            raise ValueError("Defender cannot throw.")
+
+        self._substract_card(player, card)
+
+        for pile in self.table:
+            if card.rank in [c.rank for c in pile]:
+                pile.append(card)
+                break
+        else:
+            raise ValueError("No matching rank to throw.")
+
+        if player in self.futures:
+            self.futures[player].set_result(...)
+            del self.futures[player]
+
+        if all(pl in self.passed for pl in self.active_players if pl != self.defender):
+            self._setup_throwers()
 
     def _defend(self, player: Player, card: Card) -> None:
-        return
+        if player != self.defender:
+            raise ValueError("Only defender can defend now.")
+        if not self.table:
+            raise ValueError("No cards to defend.")
+
+        for pile in self.table:
+            if not pile:
+                continue
+            top_card = pile[-1]
+            if self._can_beat(top_card, card, self.trump):
+                self._substract_card(player, card)
+                pile.append(card)
+
+                if player in self.futures:
+                    self.futures[player].set_result(...)
+                    del self.futures[player]
+                break
+        else:
+            raise ValueError("Card cannot beat any on table.")
+
+    def _setup_throwers(self):
+        self.state = "attacking"
+        self.passed.clear()
+        self.bringed = False
+
+        self.attacker = self._get_player(self.attacker, 1)
+
+        if self.attacker not in self.futures:
+            self._create_future(self.attacker)
+        if self.defender not in self.futures:
+            self._create_future(self.defender)
 
     # bound
 
@@ -137,6 +228,10 @@ class DurakGame():
             self.attacker,
             1 # next
         )
+
+    @property
+    def _attacker_passed(self) -> bool:
+        return self.attacker in self.passed
 
     def _can_beat(self, old: Card, new: Card, trump: Suits):
         if Suits.Joker in (old.suit, new.suit):
@@ -228,6 +323,7 @@ class DurakGame():
             draw = self.deck[:missing]
             hand.extend(draw)
             self.deck = self.deck[missing:]
+        self.ping_proc()
 
     def _deal_initial_hands(self) -> None:
         # создаём словарь Player -> пустая рука
@@ -250,6 +346,7 @@ class DurakGame():
 # self.bringed + 1 => 2 if True and 1 if False, coz int(True) = 1, an. False => 0
         self.bringed = False
         self.counter()
+        self.ping_proc()
 
     async def _wait_future(self, player: Player):
         try:
@@ -269,26 +366,20 @@ class DurakGame():
 
     async def _processor(self):
         while self.game_state == States.GOING:
-            for pl in self.futures.keys():
+            for pl in tuple(self.futures.keys()):
                 asyncio.create_task(
                     self._wait_future(pl)
                 )
+            try:
+                await asyncio.wait_for(self.procfuture, 3)
+            except asyncio.TimeoutError:
+                self.ping_proc()
 
-    def _setup_throwers(self):
-        match self.cfg.specialConfig.throwing:
-            case "all":
-                pls = self.players.copy()
-                try:
-                    pls.remove(self.attacker)
-                    pls.remove(self.defender)
-                except ValueError:
-                    raise ValueError("game is fatal broken.")
-                for pl in pls:
-                    self._create_future(pl)
-            case "next-pervious-only":
-                self._create_future(self.attacker)
-                self._create_future(
-                    self._get_player(self.defender, 1)
-                )
-            case _:
-                raise ValueError("cho blyat, game is fatal broken.")
+    def ping_proc(self): # anti pooling system
+        try:
+            self.procfuture.set_result(...)
+        except asyncio.InvalidStateError:
+            pass
+        finally:
+            self.procfuture = asyncio.get_event_loop().create_future()
+
