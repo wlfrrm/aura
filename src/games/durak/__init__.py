@@ -1,6 +1,6 @@
 import asyncio
 from enum import Enum
-from typing import Callable, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 from ...models.enums import States
 from ...models.typs import Player
 from ...models.gameplay import DurakConfig, GameConfig
@@ -23,10 +23,9 @@ class DurakGame():
         "deck", "state", "active_players", "eliminated",
         "conn", "attacker", "circle", "counter", "game_state",
         "futures", "processor_task", "passed_attackers", 
-        "passed", "bringed", "procfuture"
+        "passed", "bringed", "procfuture", "_waiting", "cheaters"
         ]
-        
-
+    
     def __init__(self, config: GameConfig, id: str) -> None:
         if not isinstance(config.specialConfig, DurakConfig):
             raise ValueError("Пошел ка ты нахуй")
@@ -48,6 +47,8 @@ class DurakGame():
         self.counter = self._round_counter()
         self.futures: dict[Player, asyncio.Future] = {}
         self.passed_attackers: list[Player] = []
+        self.cheaters: set[Player] = set()
+        self.trump = Suits.Joker
     
     async def add_player(self, pl: Player) -> bool:
         mn = await get_db().get_money(pl.id)
@@ -68,6 +69,12 @@ class DurakGame():
         self.game_state = States.GOING
         self._create_deck()
         self._deal_initial_hands()
+        try:
+            while self.trump == Suits.Joker:
+                for n in range(1, 4):
+                    self.trump = self.deck[-n]
+        except IndexError:
+            self.trump = rd.choice([Suits.Bubny, Suits.Chervi, Suits.Piki, Suits.Trefy])
         self.processor_task = asyncio.create_task(
             self._processor()
         )
@@ -87,31 +94,47 @@ class DurakGame():
                 if not card:
                     raise ValueError("Card data need.")
                 self._attack(player, card)
+            case PlayerActs.THROW:
+                if not card:
+                    raise ValueError("Card data need.")
+                self._throw(player, card)
+            case PlayerActs.DEFEND:
+                if not card:
+                    raise ValueError("Card data need.")
+                if not slot:
+                    raise ValueError("Slot data need.")
+                self._defend(player, slot, card)
+            case PlayerActs.CHECK:
+                if PlayerActs.CHECK not in self._avaible_actions(player):
+                    raise ValueError("Cannot CHECK now")
+                self._check(player)
+            case PlayerActs.GIVEUP:
+                self._giveup(player)
             case _:
                 raise ValueError("Unavaible action.")
         self.ping_proc()
+
     # --- actions ---
 
     def _attack(self, player: Player, card: Card) -> None:
         if player != self.attacker:
-            raise ValueError("You dont attacker now.")
+            raise ValueError("You are not attacker now.")
         if self.state != "attacking":
-            raise ValueError("Now throw stage, not attacking.")
+            raise ValueError("Cannot attack during throw phase.")
+        if card not in self.hands.get(player, []):
+            raise ValueError("You do not have this card.")
+
         if not self.table:
             self.table.append([])
 
-        self._substract_card(player, card)
+        self.hands[player].remove(card)
         self.table[0].append(card)
-        if player in self.futures:
-            self.futures[player].set_result(...)
-            del self.futures[player]
-        
         self.state = "throwing"
 
-        if self.defender not in self.futures:
-            self._create_future(self.defender)
-        if player not in self.futures:
-            self._create_future(player)
+        # Создаём фьючерсы для защиты и повторного хода
+        for p in [self.defender, player]:
+            if p not in self.futures or self.futures[p].done():
+                self._create_future(p)
 
     def _pass(self, player: Player) -> None:
         if player == self.attacker:
@@ -170,44 +193,63 @@ class DurakGame():
             raise ValueError("Not throw phase.")
         if player == self.defender:
             raise ValueError("Defender cannot throw.")
+        if card not in self.hands.get(player, []):
+            raise ValueError("You do not have this card.")
 
-        self._substract_card(player, card)
+        max_throw = min(5 if self.circle == 1 else 6, len(self.hands[self.defender]))
+        if sum(len(pile)-1 for pile in self.table) >= max_throw:
+            raise ValueError("Too many cards thrown this round.")
 
+        # Находим подходящий pile
         for pile in self.table:
-            if card.rank in [c.rank for c in pile]:
+            if any(c.rank == card.rank for c in pile):
+                self.hands[player].remove(card)
                 pile.append(card)
+                break
+            elif self.cfg.cheater:
+                self.hands[player].remove(card)
+                pile.append(card)
+                self.cheaters.add(player)
                 break
         else:
             raise ValueError("No matching rank to throw.")
 
-        if player in self.futures:
+        if player in self.futures and not self.futures[player].done():
             self.futures[player].set_result(...)
             del self.futures[player]
 
         if all(pl in self.passed for pl in self.active_players if pl != self.defender):
             self._setup_throwers()
 
-    def _defend(self, player: Player, card: Card) -> None:
+    def _defend(self, player: Player, slot: int, card: Card) -> None:
         if player != self.defender:
             raise ValueError("Only defender can defend now.")
-        if not self.table:
-            raise ValueError("No cards to defend.")
+        try:
+            pile = self.table[slot]
+        except IndexError:
+            raise ValueError("pile is not exist")
+        if len(pile) == 1: 
+            top_card = pile[0]
+            if not self._can_beat(top_card, card):
+                if self.cfg.cheater:
+                    self.cheaters.add(player)
+                else:
+                    raise ValueError("Cannot beat with this card.")
+            self.hands[player].remove(card)
+            pile.append(card)
+            if player in self.futures and not self.futures[player].done():
+                self.futures[player].set_result(...)
+                del self.futures[player]
+            return
+        raise ValueError("No card to defend or cannot beat any.")
 
-        for pile in self.table:
-            if not pile:
-                continue
-            top_card = pile[-1]
-            if self._can_beat(top_card, card, self.trump):
-                self._substract_card(player, card)
-                pile.append(card)
-
-                if player in self.futures:
-                    self.futures[player].set_result(...)
-                    del self.futures[player]
-                break
+    def _check(self, player: Player):
+        if len(self.cheaters) == 0:
+            for cheater in self.cheaters:   
+                self._giveup(cheater)
         else:
-            raise ValueError("Card cannot beat any on table.")
-
+            self._giveup(player)
+    
     def _setup_throwers(self):
         self.state = "attacking"
         self.passed.clear()
@@ -233,12 +275,54 @@ class DurakGame():
     def _attacker_passed(self) -> bool:
         return self.attacker in self.passed
 
-    def _can_beat(self, old: Card, new: Card, trump: Suits):
+    @property
+    def _last_card(self) -> Optional[Card]:
+        try:
+            return self.deck[-1]
+        except IndexError:
+            return None
+
+    def _avaible_actions(self, player: Player) -> list[PlayerActs]:
+        # Игроки, которые уже пропустили ход, могут только сдаться
+        if player in self.passed:
+            return [PlayerActs.GIVEUP]
+
+        result: list[PlayerActs] = []
+
+        # Защитник может отбиваться
+        if player == self.defender and self.table:
+            result.append(PlayerActs.DEFEND)
+            result.append(PlayerActs.PASS)
+
+        # Атакующий на стадии атаки
+        if player == self.attacker and self.state == "attacking":
+            if self.hands.get(player):
+                result.append(PlayerActs.ATTACK)
+            result.append(PlayerActs.PASS)
+
+        # Игроки на стадии "throwing" могут подкидывать карты
+        if self.state == "throwing" and player != self.defender:
+            if self.hands.get(player) and self.cfg.specialConfig.throwing == "all":
+                result.append(PlayerActs.THROW)
+                result.append(PlayerActs.PASS)
+            elif self.hands.get(player) and self.cfg.specialConfig.throwing == "next-pervious-only":
+                # Игрок может подкидывать если он "следующий" или уже участвовал
+                if player in self.passed or player == self._get_player(self.attacker, 1):
+                    result.append(PlayerActs.THROW)
+                    result.append(PlayerActs.PASS)
+
+        # Действие "CHECK" доступно только если включен шуллер и есть карты на столе
+        if self.cfg.cheater and self.table:
+            result.append(PlayerActs.CHECK)
+
+        return result
+
+    def _can_beat(self, old: Card, new: Card):
         if Suits.Joker in (old.suit, new.suit):
             return True
         if old.suit == new.suit:
             return new.rank > old.rank
-        return new.suit == trump and old.suit != trump
+        return new.suit == self.trump and old.suit != self.trump
 
     def _calc_exp(self) -> int | float:
         if self.cfg.betType == "all-in":
@@ -348,28 +432,50 @@ class DurakGame():
         self.counter()
         self.ping_proc()
 
+    def _end_round(self):
+        self.table.clear()
+        self.passed.clear()
+        self.passed_attackers.clear()
+        self._move_to_next_attacker()
+        self._refill_hands()
+        self.cheaters.clear()
+
     async def _wait_future(self, player: Player):
+        if player in self._waiting:
+            return
+        self._waiting.add(player)
+        fut = self.futures.get(player)
+        if not fut:
+            self._waiting.discard(player)
+            return
+
+        timeout = 6 if self.cfg.speed == "Rapid" else 15 if self.cfg.speed == "Fast" else 30
         try:
-            fut = self.futures.get(player)
-            if not fut:
-                raise ValueError("Player has no active actions.")
-            await asyncio.wait_for(fut, 
-                (6 if self.cfg.speed == "Rapid" else
-                (15 if self.cfg.speed == "Fast" else 30))
-            )
+            await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
             self._pass(player)
-        del self.futures[player]
+        finally:
+            if self.futures.get(player) is fut:
+                del self.futures[player]
+            self._waiting.discard(player)
 
     def _create_future(self, player: Player):
-        self.futures[player] = asyncio.get_event_loop().create_future()
+        if player in self.futures:
+            fut = self.futures[player]
+            if fut.done():
+                self.futures[player] = asyncio.get_event_loop().create_future()
+        else:
+            self.futures[player] = asyncio.get_event_loop().create_future()
 
     async def _processor(self):
         while self.game_state == States.GOING:
+            if not hasattr(self, "_waiting"):
+                self._waiting = set()
+
             for pl in tuple(self.futures.keys()):
-                asyncio.create_task(
-                    self._wait_future(pl)
-                )
+                if pl not in self._waiting:
+                    self._waiting.add(pl)
+                    asyncio.create_task(self._wait_future(pl))
             try:
                 await asyncio.wait_for(self.procfuture, 3)
             except asyncio.TimeoutError:
@@ -383,3 +489,22 @@ class DurakGame():
         finally:
             self.procfuture = asyncio.get_event_loop().create_future()
 
+    def serialize(self, player: Player) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "table": self.table,
+            "hand": self.hands[player],
+            "trump": self.trump,
+            "last_card": self._last_card,
+            "attacker": self.attacker,
+            "defender": self.defender,
+            "avaible_actions": self._avaible_actions(player),
+            "players": {pl.id: {
+                "frame": pl.frame,
+                "backcard": pl.backcard,
+                "ingame": pl in self.active_players,
+                "cards": len(self.hands[pl]),
+                "php": pl.phplink,
+                "name": pl.name
+            } for pl in self.players}
+        }
