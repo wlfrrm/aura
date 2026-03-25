@@ -195,32 +195,14 @@ class DurakGame():
             raise ValueError("Defender cannot throw.")
         if card not in self.hands.get(player, []):
             raise ValueError("You do not have this card.")
-
         max_throw = min(5 if self.circle == 1 else 6, len(self.hands[self.defender]))
         if sum(len(pile)-1 for pile in self.table) >= max_throw:
             raise ValueError("Too many cards thrown this round.")
-
-        # Находим подходящий pile
-        for pile in self.table:
-            if any(c.rank == card.rank for c in pile):
-                self.hands[player].remove(card)
-                pile.append(card)
-                break
-            elif self.cfg.cheater:
-                self.hands[player].remove(card)
-                pile.append(card)
-                self.cheaters.add(player)
-                break
-        else:
-            raise ValueError("No matching rank to throw.")
-
-        if player in self.futures and not self.futures[player].done():
-            self.futures[player].set_result(...)
-            del self.futures[player]
-
-        if all(pl in self.passed for pl in self.active_players if pl != self.defender):
-            self._setup_throwers()
-
+        if not self._check_throw_rank(card.rank):
+            raise ValueError("You cannot throw this card.")
+        self.table.append([card])
+        self.hands[player].remove(card)
+        
     def _defend(self, player: Player, slot: int, card: Card) -> None:
         if player != self.defender:
             raise ValueError("Only defender can defend now.")
@@ -240,11 +222,13 @@ class DurakGame():
             if player in self.futures and not self.futures[player].done():
                 self.futures[player].set_result(...)
                 del self.futures[player]
+            if all(len(pile) == 2 for pile in self.table):
+                self._end_round()
             return
         raise ValueError("No card to defend or cannot beat any.")
 
     def _check(self, player: Player):
-        if len(self.cheaters) == 0:
+        if self.cheaters:
             for cheater in self.cheaters:   
                 self._giveup(cheater)
         else:
@@ -359,6 +343,13 @@ class DurakGame():
 
         return _
 
+    def _check_throw_rank(self, rank: Ranks) -> bool:
+        for pile in self.table:
+            for card in pile:
+                if card.rank == rank:
+                    return True
+        return False
+    
     def _create_deck(self) -> list[Card]:
         deck: list[Card] = []
         if not isinstance(self.cfg.specialConfig, DurakConfig):
