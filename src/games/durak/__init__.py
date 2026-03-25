@@ -287,7 +287,7 @@ class DurakGame():
         else:
             self._giveup(player)
     
-    # --- bound 
+    # --- bound ---
 
     def _setup_throwers(self):
         self.state = "attacking"
