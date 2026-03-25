@@ -7,6 +7,7 @@ class DurakConfig(BaseModel):
     jokers: bool
     throwing: Literal["all", "next-pervious-only"]
     cardsCount: int
+    draws: bool
 
     @validator("cardsCount")
     def cards_count(cls, v: int) -> int:
@@ -34,6 +35,7 @@ class GameConfig(BaseModel):
     speed: GameSpeeds
     specialConfig: Union[DurakConfig, UnoConfig]
     gameBet: int
+    draw: bool
     cheater: bool
     betType: GameBetType
 

@@ -23,7 +23,8 @@ class DurakGame():
         "deck", "state", "active_players", "eliminated",
         "conn", "attacker", "circle", "counter", "game_state",
         "futures", "processor_task", "passed_attackers", 
-        "passed", "bringed", "procfuture", "_waiting", "cheaters"
+        "passed", "defender_took", "procfuture", "_waiting", 
+        "cheaters", "round", "places", "winround", "kickround"
         ]
     
     def __init__(self, config: GameConfig, id: str) -> None:
@@ -32,9 +33,12 @@ class DurakGame():
         self.game_state = States.NOT_STARTED
         self.cfg = config
         self.id = id
-        self.bringed: bool = False
+        self.winround = 1
+        self.kickround = 1
+        self.round = 1
+        self.defender_took: bool = False
         self.players: list[Player] = []
-        self.hands: dict[Player, list[Card]] = {}
+        self.hands: dict[int, list[Card]] = {}
         self.table: list[list[Card]] = []
         self.deck: list[Card] = []
         self.state: Literal["attacking", "throwing"] = "attacking"
@@ -48,8 +52,13 @@ class DurakGame():
         self.futures: dict[Player, asyncio.Future] = {}
         self.passed_attackers: list[Player] = []
         self.cheaters: set[Player] = set()
+        self._waiting: set[Player] = set()
         self.trump = Suits.Joker
-    
+        self.places: list[set[Player]] = [set() for _ in range(
+            self.cfg.playersCount)]
+
+    # --- public ---
+
     async def add_player(self, pl: Player) -> bool:
         mn = await get_db().get_money(pl.id)
         if not mn:
@@ -69,12 +78,12 @@ class DurakGame():
         self.game_state = States.GOING
         self._create_deck()
         self._deal_initial_hands()
-        try:
-            while self.trump == Suits.Joker:
-                for n in range(1, 4):
-                    self.trump = self.deck[-n]
-        except IndexError:
-            self.trump = rd.choice([Suits.Bubny, Suits.Chervi, Suits.Piki, Suits.Trefy])
+        while True:
+            card = self.deck[-1]
+            if card.suit != Suits.Joker:
+                self.trump = card.suit
+                break
+            self.deck.pop()
         self.processor_task = asyncio.create_task(
             self._processor()
         )
@@ -84,7 +93,7 @@ class DurakGame():
             player: Player,
             slot: Optional[int], 
             card: Optional[Card]) -> None:
-        self.ping_proc()
+        self._ping_proc()
         if player not in self.active_players:
             raise ValueError("Player is not active in game.")
         match acttype:
@@ -112,7 +121,27 @@ class DurakGame():
                 self._giveup(player)
             case _:
                 raise ValueError("Unavaible action.")
-        self.ping_proc()
+        self._ping_proc()
+
+    def serialize(self, player: Player) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "table": self.table,
+            "hand": list(self.hands[player.id]),
+            "trump": self.trump,
+            "last_card": self._last_card,
+            "attacker": self.attacker,
+            "defender": self.defender,
+            "avaible_actions": self._avaible_actions(player),
+            "players": {pl.id: {
+                "frame": pl.frame,
+                "backcard": pl.backcard,
+                "ingame": pl in self.active_players,
+                "cards": len(self.hands[pl.id]),
+                "php": pl.phplink,
+                "name": pl.name
+            } for pl in self.players}
+        }
 
     # --- actions ---
 
@@ -121,13 +150,13 @@ class DurakGame():
             raise ValueError("You are not attacker now.")
         if self.state != "attacking":
             raise ValueError("Cannot attack during throw phase.")
-        if card not in self.hands.get(player, []):
+        if card not in self.hands.get(player.id, []):
             raise ValueError("You do not have this card.")
 
         if not self.table:
             self.table.append([])
 
-        self.hands[player].remove(card)
+        self.hands[player.id].remove(card)
         self.table[0].append(card)
         self.state = "throwing"
 
@@ -149,7 +178,7 @@ class DurakGame():
         if player == self.defender:
             if not self.table:
                 raise ValueError("Attacker is not attacked yet.")
-            self.bringed = True
+            self.defender_took = True
             self.passed.append(player)
 
             if player in self.futures:
@@ -160,7 +189,8 @@ class DurakGame():
                 if pl != self.defender and pl not in self.passed and pl not in self.futures:
                     self._create_future(pl)
 
-            if all(pl in self.passed for pl in self.active_players if pl != self.defender):
+            attackers = [pl for pl in self.active_players if pl != self.defender]
+            if all(pl in self.passed for pl in attackers):
                 self._setup_throwers()
             return
 
@@ -174,38 +204,61 @@ class DurakGame():
             return
 
     def _giveup(self, player: Player) -> None:
-        if player not in self.hands:
+        if player.id not in self.hands:
             return
 
         for pile in self.table:
-            self.hands[player].extend(pile)
+            self.hands[player.id].extend(pile)
+
+        # Исключаем игрока как проигравшего этого раунда
+        self._kick_player(player, -1)
+        
+        # Удаляем из активных игроков
+        if player in self.active_players:
+            self.active_players.remove(player)
+        
+        # Если остался один игрок - конец игры
+        if len(self.active_players) <= 1:
+            self.game_state = States.ENDED
+            return
 
         self.table.clear()
-        self.bringed = False
+        self.defender_took = False
         self.passed.clear()
         self.passed_attackers.clear()
+        self.futures.clear()
+        for fut in list(self.futures.values()):
+            fut.cancel()
 
         self._move_to_next_attacker()
         self._refill_hands()
+        self._eliminate_empty_hands()
 
     def _throw(self, player: Player, card: Card) -> None:
         if self.state != "throwing":
             raise ValueError("Not throw phase.")
         if player == self.defender:
             raise ValueError("Defender cannot throw.")
-        if card not in self.hands.get(player, []):
+        if card not in self.hands.get(player.id, []):
             raise ValueError("You do not have this card.")
-        max_throw = min(5 if self.circle == 1 else 6, len(self.hands[self.defender]))
-        if sum(len(pile)-1 for pile in self.table) >= max_throw:
+        
+        # Проверяем что защитник еще в игре
+        if self.defender not in self.active_players:
+            raise ValueError("Defender is no longer in game.")
+            
+        max_throw = min(5 if self.circle == 1 else 6, len(self.hands[self.defender.id]))
+        if sum(max(0, len(pile) - 1) for pile in self.table) >= max_throw:
             raise ValueError("Too many cards thrown this round.")
         if not self._check_throw_rank(card.rank):
             raise ValueError("You cannot throw this card.")
         self.table.append([card])
-        self.hands[player].remove(card)
-        
+        self.hands[player.id].remove(card)
+    
     def _defend(self, player: Player, slot: int, card: Card) -> None:
         if player != self.defender:
             raise ValueError("Only defender can defend now.")
+        if card not in self.hands[player.id]:
+            raise ValueError("You do not have this card.")
         try:
             pile = self.table[slot]
         except IndexError:
@@ -217,7 +270,7 @@ class DurakGame():
                     self.cheaters.add(player)
                 else:
                     raise ValueError("Cannot beat with this card.")
-            self.hands[player].remove(card)
+            self.hands[player.id].remove(card)
             pile.append(card)
             if player in self.futures and not self.futures[player].done():
                 self.futures[player].set_result(...)
@@ -229,24 +282,28 @@ class DurakGame():
 
     def _check(self, player: Player):
         if self.cheaters:
-            for cheater in self.cheaters:   
+            for cheater in list(self.cheaters):   
                 self._giveup(cheater)
         else:
             self._giveup(player)
     
+    # --- bound 
+
     def _setup_throwers(self):
         self.state = "attacking"
         self.passed.clear()
-        self.bringed = False
-
-        self.attacker = self._get_player(self.attacker, 1)
+        self.defender_took = False
+        
+        # Проверяем и исключаем игроков с пустыми руками перед следующим раундом
+        self._eliminate_empty_hands()
+        
+        if len(self.active_players) <= 1:
+            return
 
         if self.attacker not in self.futures:
             self._create_future(self.attacker)
         if self.defender not in self.futures:
             self._create_future(self.defender)
-
-    # bound
 
     @property
     def defender(self) -> Player:
@@ -280,23 +337,23 @@ class DurakGame():
 
         # Атакующий на стадии атаки
         if player == self.attacker and self.state == "attacking":
-            if self.hands.get(player):
+            if self.hands.get(player.id):
                 result.append(PlayerActs.ATTACK)
             result.append(PlayerActs.PASS)
 
         # Игроки на стадии "throwing" могут подкидывать карты
         if self.state == "throwing" and player != self.defender:
-            if self.hands.get(player) and self.cfg.specialConfig.throwing == "all":
+            if self.hands.get(player.id) and self.cfg.specialConfig.throwing == "all":
                 result.append(PlayerActs.THROW)
                 result.append(PlayerActs.PASS)
-            elif self.hands.get(player) and self.cfg.specialConfig.throwing == "next-pervious-only":
+            elif self.hands.get(player.id) and self.cfg.specialConfig.throwing == "next-pervious-only":
                 # Игрок может подкидывать если он "следующий" или уже участвовал
                 if player in self.passed or player == self._get_player(self.attacker, 1):
                     result.append(PlayerActs.THROW)
                     result.append(PlayerActs.PASS)
 
-        # Действие "CHECK" доступно только если включен шуллер и есть карты на столе
-        if self.cfg.cheater and self.table:
+        # Действие "CHECK" доступно только если включен шуллер и есть карты на столе, и игрок атакующий или защитник
+        if self.cfg.cheater and self.table and player in (self.attacker, self.defender):
             result.append(PlayerActs.CHECK)
 
         return result
@@ -384,13 +441,13 @@ class DurakGame():
         if not self.deck:
             return
 
-        max_cards = self.cfg.specialConfig.cardsCount // len(self.players)
+        max_cards = 6  # Стандартное количество карт в руке для Дурака
 
         # создаём очередь игроков начиная с атакующего
         queue = [self.attacker] + [self._get_player(self.attacker, i) for i in range(1, len(self.active_players))]
 
         for pl in queue:
-            hand = self.hands[pl]
+            hand = self.hands[pl.id]
             missing = max_cards - len(hand)
             if missing <= 0:
                 continue
@@ -398,11 +455,11 @@ class DurakGame():
             draw = self.deck[:missing]
             hand.extend(draw)
             self.deck = self.deck[missing:]
-        self.ping_proc()
+        self._ping_proc()
 
     def _deal_initial_hands(self) -> None:
         # создаём словарь Player -> пустая рука
-        self.hands = {pl: [] for pl in self.active_players}
+        self.hands = {pl.id: [] for pl in self.active_players}
         max_cards = self.cfg.specialConfig.cardsCount // len(self.players)  # type: ignore
 
         while any(len(hand) < max_cards for hand in self.hands.values()) and self.deck:
@@ -412,16 +469,23 @@ class DurakGame():
 
     def _substract_card(self, player: Player, card: Card) -> None:
         try:
-            self.hands[player].remove(card)
+            self.hands[player.id].remove(card)
         except ValueError:
             raise ValueError("You dont have this card.")
 
     def _move_to_next_attacker(self):
-        self.attacker = self._get_player(self.attacker, self.bringed + 1)
-# self.bringed + 1 => 2 if True and 1 if False, coz int(True) = 1, an. False => 0
-        self.bringed = False
+        if not self.active_players:
+            return
+            
+        # Если текущий атакующий больше не в игре, берем первого доступного
+        if self.attacker not in self.active_players:
+            self.attacker = self.active_players[0]
+        
+        self.attacker = self._get_player(self.attacker, self.defender_took + 1)
+        # self.defender_took + 1 => 2 if True and 1 if False, coz int(True) = 1, an. False => 0
+        self.defender_took = False
         self.counter()
-        self.ping_proc()
+        self._ping_proc()
 
     def _end_round(self):
         self.table.clear()
@@ -430,6 +494,13 @@ class DurakGame():
         self._move_to_next_attacker()
         self._refill_hands()
         self.cheaters.clear()
+        self._create_future(self.attacker)
+        self._create_future(self.defender)
+        self.round += 1
+        for fut in list(self.futures.values()):
+            fut.cancel()
+        # Проверяем и исключаем игроков с пустыми руками
+        self._eliminate_empty_hands()
 
     async def _wait_future(self, player: Player):
         if player in self._waiting:
@@ -470,32 +541,62 @@ class DurakGame():
             try:
                 await asyncio.wait_for(self.procfuture, 3)
             except asyncio.TimeoutError:
-                self.ping_proc()
+                self._ping_proc()
 
-    def ping_proc(self): # anti pooling system
+    def _kick_player(self, player: Player, swift: Literal[1, -1]):
+        rng = range(len(self.places)) if swift == 1 else range(len(self.places)-1, -1, -1)
+        
+        for i in rng:
+            place = self.places[i]
+
+            if self.cfg.draw:
+                from_index = (self.winround if swift == 1 else self.kickround) == self.circle
+                if from_index or not place:
+                    place.add(player)
+                    if swift == 1:
+                        self.winround = self.circle
+                    else:
+                        self.kickround = self.circle
+                    break
+            else:
+                if swift == 1:
+                    if not place:
+                        place.add(player)
+                        break
+                else:
+                    # поражения: можно делить слот, если совпадает раунд
+                    from_index = self.kickround == self.round
+                    if from_index or not place:
+                        place.add(player)
+                        self.kickround = self.round
+                        break
+
+    def _eliminate_empty_hands(self) -> None:
+        """Исключает игроков с пустыми руками и без карт в колоде"""
+        to_eliminate = []
+        
+        for player in self.active_players:
+            if len(self.hands[player.id]) == 0 and not self.deck:
+                to_eliminate.append(player)
+        
+        for player in to_eliminate:
+            self._kick_player(player, 1)
+            self.active_players.remove(player)
+            
+            if len(self.active_players) <= 1:
+                # Последний оставшийся - финалист (иногда второе место, зависит от правил)
+                if self.active_players:
+                    self._kick_player(self.active_players[0], 1)
+                    self.game_state = States.ENDED
+                break
+            
+            if self.attacker not in self.active_players and self.active_players:
+                self.attacker = self.active_players[0]
+
+    def _ping_proc(self): # anti pooling system
         try:
             self.procfuture.set_result(...)
         except asyncio.InvalidStateError:
             pass
         finally:
             self.procfuture = asyncio.get_event_loop().create_future()
-
-    def serialize(self, player: Player) -> dict[str, Any]:
-        return {
-            "state": self.state,
-            "table": self.table,
-            "hand": self.hands[player],
-            "trump": self.trump,
-            "last_card": self._last_card,
-            "attacker": self.attacker,
-            "defender": self.defender,
-            "avaible_actions": self._avaible_actions(player),
-            "players": {pl.id: {
-                "frame": pl.frame,
-                "backcard": pl.backcard,
-                "ingame": pl in self.active_players,
-                "cards": len(self.hands[pl]),
-                "php": pl.phplink,
-                "name": pl.name
-            } for pl in self.players}
-        }
