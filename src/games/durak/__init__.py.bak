@@ -77,15 +77,13 @@ class DurakGame():
         self.procfuture = asyncio.get_event_loop().create_future()
         self.game_state = States.GOING
         self._create_deck()
-        while self.deck:
+        self._deal_initial_hands()
+        while True:
             card = self.deck[-1]
             if card.suit != Suits.Joker:
                 self.trump = card.suit
                 break
             self.deck.pop()
-        else:
-            self.trump = Suits.Joker  # если все джокеры или пусто
-        self._deal_initial_hands()
         self.processor_task = asyncio.create_task(
             self._processor()
         )
@@ -112,7 +110,7 @@ class DurakGame():
             case PlayerActs.DEFEND:
                 if not card:
                     raise ValueError("Card data need.")
-                if slot is None:
+                if not slot:
                     raise ValueError("Slot data need.")
                 self._defend(player, slot, card)
             case PlayerActs.CHECK:
@@ -155,8 +153,12 @@ class DurakGame():
         if card not in self.hands.get(player.id, []):
             raise ValueError("You do not have this card.")
 
+        if not self.table:
+            self.table.append([])
+
         self.hands[player.id].remove(card)
-        self.table.append([card])
+        self.table[0].append(card)
+        self.state = "throwing"
 
         # Создаём фьючерсы для защиты и повторного хода
         for p in [self.defender, player]:
@@ -169,9 +171,6 @@ class DurakGame():
                 self._giveup(player)
                 return
             self.passed_attackers.append(player)
-            if all(len(pile) == 2 for pile in self.table):
-                self._end_round()
-                return
             self._move_to_next_attacker()
             self._refill_hands()
             return
@@ -180,7 +179,6 @@ class DurakGame():
             if not self.table:
                 raise ValueError("Attacker is not attacked yet.")
             self.defender_took = True
-            self.state = "throwing"
             self.passed.append(player)
 
             if player in self.futures:
@@ -277,6 +275,8 @@ class DurakGame():
             if player in self.futures and not self.futures[player].done():
                 self.futures[player].set_result(...)
                 del self.futures[player]
+            if all(len(pile) == 2 for pile in self.table):
+                self._end_round()
             return
         raise ValueError("No card to defend or cannot beat any.")
 
@@ -373,12 +373,12 @@ class DurakGame():
 
     def _get_player(self, pl: Player, shift: int) -> Player:
         if not self.active_players:
-            raise ValueError("Game is ended.")
+            raise RuntimeError("Game is ended.")
 
         try:
             i = self.active_players.index(pl)
         except ValueError:
-            raise ValueError("Player is not in game")
+            raise RuntimeError("Player is not in game")
 
         return self.active_players[(i + shift) % len(self.active_players)]
     
@@ -460,7 +460,7 @@ class DurakGame():
     def _deal_initial_hands(self) -> None:
         # создаём словарь Player -> пустая рука
         self.hands = {pl.id: [] for pl in self.active_players}
-        max_cards = 6  # type: ignore
+        max_cards = self.cfg.specialConfig.cardsCount // len(self.players)  # type: ignore
 
         while any(len(hand) < max_cards for hand in self.hands.values()) and self.deck:
             for pl, hand in self.hands.items():
@@ -477,6 +477,7 @@ class DurakGame():
         if not self.active_players:
             return
             
+        # Если текущий атакующий больше не в игре, берем первого доступного
         if self.attacker not in self.active_players:
             self.attacker = self.active_players[0]
         

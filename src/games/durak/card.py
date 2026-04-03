@@ -27,3 +27,6 @@ class Ranks(IntEnum):
 class Card(BaseModel):
     suit: Suits
     rank: Ranks
+
+    def __str__(self):
+        return f"{self.rank.name} of {self.suit.name}"

@@ -2,7 +2,7 @@ from enum import IntEnum, StrEnum
 
 class GameTypes(StrEnum):
     Durak = "Durak"
-    # Uno = "Uno"
+    Uno = "Uno"
     
 
 class GameSpeeds(StrEnum):

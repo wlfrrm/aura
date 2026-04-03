@@ -1,5 +1,5 @@
 from typing import Literal, Union
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, validator, root_validator
 from .enums import GameSpeeds, GameTypes, GameBetType
 
 class DurakConfig(BaseModel):
@@ -17,16 +17,9 @@ class DurakConfig(BaseModel):
 
 class UnoConfig(BaseModel):
     allowStackDraws: bool
-    throwing: Union[Literal["all", "next-pervious-only"], Literal[None]]
     takingRule: Literal["one", "two", "while-cant-beat"]
     takingIfNotUno: Literal[2, 4]
     colorChangeThrow: bool
-
-class Player(BaseModel):
-    id: int
-    name: str
-    phplink: str
-    elo: int
 
 class GameConfig(BaseModel):
     gameType: GameTypes

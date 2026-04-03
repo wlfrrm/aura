@@ -1,6 +1,6 @@
 from aiosqlite import connect, Row
 from .config import Config
-from models.user import User
+from .models.user import User
 import json
 
 class QUERIES:
@@ -62,6 +62,8 @@ class Database: # temp variant with sqlite3, will be replaced with postgres in t
         return await self.do(self.q.add_money, money, id)
 
     async def get_money(self, id: int):
+        if id < 120 and Config.TEST_MODE:
+            return 5000000
         try:
             return (await self.fetchone(
                 self.q.get_money,

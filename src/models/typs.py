@@ -13,6 +13,12 @@ class Player(BaseModel):
     frame: str = "f0"
     backcard: str = "c0"
 
+    def __hash__(self) -> int:
+        return (
+            hash(self.id * hash(self.name) / hash(self.elo) * hash(self.phplink)
+                * hash(self.frame) / hash(self.backcard))
+        )
+
 class WebAppData(BaseModel):
     id: int
     first_name: Optional[str]
