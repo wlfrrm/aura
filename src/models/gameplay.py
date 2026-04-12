@@ -16,10 +16,8 @@ class DurakConfig(BaseModel):
         return v
 
 class UnoConfig(BaseModel):
-    allowStackDraws: bool
     takingRule: Literal["one", "two", "while-cant-beat"]
     takingIfNotUno: Literal[2, 4]
-    colorChangeThrow: bool
 
 class GameConfig(BaseModel):
     gameType: GameTypes
@@ -39,7 +37,7 @@ class GameConfig(BaseModel):
     @validator("playersCount", "gameBet")
     def non_negative(cls, v: int) -> int:  # pylint: disable=unused-argument
         if v < 0:
-            raise ValueError("must be non‑negative")
+            raise ValueError   ("must be non-negative")
         return v
 
     @root_validator(pre=False, skip_on_failure=True)  # type: ignore[misc]
@@ -48,7 +46,7 @@ class GameConfig(BaseModel):
         sc = values.get("specialConfig")
         if gt == GameTypes.Durak and not isinstance(sc, DurakConfig):
             raise ValueError("specialConfig must be DurakConfig when gameType is Durak")
-        # if gt == GameTypes.Uno and not isinstance(sc, UnoConfig):
-        #     raise ValueError("specialConfig must be UnoConfig when gameType is Uno")
+        if gt == GameTypes.Uno and not isinstance(sc, UnoConfig):
+            raise ValueError("specialConfig must be UnoConfig when gameType is Uno")
         return values
 

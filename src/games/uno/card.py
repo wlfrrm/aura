@@ -40,6 +40,11 @@ class Card(BaseModel):
                 self.rank == card.rank or 
                 card.rank in (Ranks.BlackJoker, Ranks.ColorfulJoker)
             )
+    
+    def hand_has(self, hand: list["Card"]) -> bool:
+        if self.rank in (Ranks.BlackJoker, Ranks.ColorfulJoker): # joker card can get any suit, so we check only rank
+            return any(card.rank == self.rank for card in hand)
+        return any(card.suit == self.suit and card.rank == self.rank for card in hand)
 
     @property
     def effect(self) -> Optional[Effects]:

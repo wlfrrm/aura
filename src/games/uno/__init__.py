@@ -1,41 +1,48 @@
+import asyncio
 from enum import Enum
 import random
-from typing import Literal, Optional
+from typing import Optional
 from ...exceptions import InGameException
 from games.uno import acts, static
-from models.gameplay import GameConfig
+from models.gameplay import GameConfig, UnoConfig
 from models.typs import Player
-from .card import Card, Ranks, Suits
+from .card import Card
 
 class PlayerActs(Enum):
     THROW = "throw"
     TAKE = "take"
     UNO = "uno"
+    GIVEUP = "giveup"
     CHECK = "check"
 
 class UnoGame:
     __slots__ = (
         "players", "active_player", "clockwise_direction", "cfg", "processor_task", 
-        "id","futures", "not_said_uno", "current_card", "hands", "eliminated_players",
-        "active_players", "running", "add_sum", "round"
+        "id","future", "not_said_uno", "current_card", "hands", "eliminated_players",
+        "active_players", "running", "add_sum", "round", "next_winner_place",
+        "next_loser_place", "cheated"
     )
     def __init__(self, cfg: GameConfig, id: str):
         if cfg.gameType != "Uno":
             raise InGameException("Invalid game type for UnoGame")
+        elif not isinstance(cfg.specialConfig, UnoConfig):
+            raise InGameException("Invalid game configuration for UnoGame")
         self.players: list[Player] = []
         self.active_players: list[Player] = []
-        self.active_player = random.choice(self.active_players)
         self.clockwise_direction = True
         self.cfg = cfg
+        self.processor_task: asyncio.Task
         self.add_sum = 0
-        self.processor_task = None
-        self.futures = {}
+        self.future: Optional[asyncio.Future] = None
+        self.cheated = False
         self.not_said_uno = set()
         self.current_card: Card
         self.hands: dict[Player, list[Card]] = {}
-        self.eliminated_players = set()
+        self.eliminated_players: dict[Player, int] = {}
         self.id = id
         self.running: bool = False
+        self.next_winner_place = 0
+        self.next_loser_place = cfg.playersCount - 1
     
     # --- public methods ---
 
@@ -51,25 +58,44 @@ class UnoGame:
         self._setup_hands()
         self.current_card = static.get_passive_card()
         self.active_players = self.players.copy()
+        self.active_player = random.choice(self.active_players)
         self.running = True
         self.round = 0
     
-    def act(self, 
-            player: Player, action: PlayerActs, 
-            card: Optional[Card] = None) -> None:
-        if player != self.active_player:
-            raise InGameException("It's not your turn")
-        if self.running != "active":
+    def act(
+        self,
+        player: Player,
+        action: PlayerActs,
+        card: Optional[Card] = None
+    ) -> None:
+        if not self.running:
             raise InGameException("Game not started.")
+
+        ACTIONS = {
+            PlayerActs.THROW: (acts.throw, True),
+            PlayerActs.TAKE: (acts.take, False),
+            PlayerActs.UNO: (acts.uno, False),
+            PlayerActs.GIVEUP: (acts.giveup, False),
+            PlayerActs.CHECK: (acts.check, False),
+        }
+
         try:
-            return {
-                PlayerActs.THROW: acts.throw,
-                PlayerActs.TAKE: acts.take,
-                PlayerActs.UNO: acts.uno,
-                PlayerActs.CHECK: acts.check
-            }[action](self, card)
+            handler, requires_card = ACTIONS[action]
         except KeyError:
             raise InGameException("Invalid action")
+
+        if action == PlayerActs.THROW and self.active_player != player:
+            raise InGameException("It's not your turn!")
+
+        if requires_card and card is None:
+            raise InGameException("Card must be provided for this action")
+
+        if not requires_card and card is not None:
+            raise InGameException("Card must not be provided for this action")
+
+        arg = card if requires_card else player
+
+        return handler(self, arg)
     
     # --- bound methods ---
 
@@ -94,4 +120,3 @@ class UnoGame:
         for hand in self.hands.values():
             for _ in range(7):
                 hand.append(static.get_card())
-
