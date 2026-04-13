@@ -1,9 +1,8 @@
 import random
-
 from models.typs import Player
 from typing import TYPE_CHECKING
 from ...exceptions import InGameException
-
+from ...config import Config
 from . import UnoGame as Game
 from .card import Card, Ranks, Suits
 from ...models import UnoConfig
@@ -99,3 +98,12 @@ def punish_not_said_uno(self: UnoGame, excluded_player=None) -> int:
         self.not_said_uno.discard(player)
 
     return len(punished_players)
+
+def get_timeout_from_cfg(game: Game) -> int:
+    if not isinstance(game.cfg.specialConfig, UnoConfig):
+        raise InGameException("Invalid game configuration for UnoGame")
+    return {
+        "Rapid": Config.TIMEOUT_RAPID,
+        "Normal": Config.TIMEOUT_STANDARD,
+        "Fast": Config.TIMEOUT_FAST
+    }[game.cfg.speed]

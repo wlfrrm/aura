@@ -61,8 +61,10 @@ class UnoGame:
         self.active_player = random.choice(self.active_players)
         self.running = True
         self.round = 0
+        self.future = asyncio.get_event_loop().create_future()
+        self.processor_task = asyncio.create_task(self._processor())
     
-    def act(
+    async def act(
         self,
         player: Player,
         action: PlayerActs,
@@ -92,10 +94,10 @@ class UnoGame:
 
         if not requires_card and card is not None:
             raise InGameException("Card must not be provided for this action")
-
         arg = card if requires_card else player
-
-        return handler(self, arg)
+        result = handler(self, arg)
+        await self._update_future()
+        return result
     
     # --- bound methods ---
 
@@ -120,3 +122,21 @@ class UnoGame:
         for hand in self.hands.values():
             for _ in range(7):
                 hand.append(static.get_card())
+
+    async def _update_future(self):
+        if self.future and not self.future.done():
+            self.future.set_result(None)
+        self.future = asyncio.get_event_loop().create_future()
+
+    async def _processor(self):
+        while self.running:
+            try:
+                if not self.future:
+                    raise InGameException ("Processor called without a future")
+                await asyncio.wait_for(self.future, timeout=
+                                static.get_timeout_from_cfg(self)
+                )
+                await self._update_future()
+            except asyncio.TimeoutError:
+                await self.act(self.active_player, PlayerActs.TAKE)
+                await self._update_future()

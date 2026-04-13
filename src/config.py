@@ -20,6 +20,9 @@ class _Config(BaseModel):
     BOT_TOKEN: str
     HOST: str
     PORT: int
+    TIMEOUT_RAPID: int
+    TIMEOUT_STANDARD: int
+    TIMEOUT_FAST: int
 
     @classmethod
     def from_json_file(cls, path: str):
